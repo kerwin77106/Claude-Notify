@@ -110,12 +110,13 @@ export class HookServer extends EventEmitter {
     event: string
     sessionId?: string
     cwd?: string
+    title?: string
     pid?: number
     hwnd?: number
     timestamp?: number
   }): void {
-    const { event, sessionId, cwd, pid, hwnd, timestamp } = data
-    console.log(`[HookServer] ${event}: sessionId=${sessionId}, cwd=${cwd}, hwnd=${hwnd}, pid=${pid}`)
+    const { event, sessionId, cwd, title, pid, hwnd, timestamp } = data
+    console.log(`[HookServer] ${event}: sessionId=${sessionId}, cwd=${cwd}, title=${title || ''}, hwnd=${hwnd}, pid=${pid}`)
     if (!sessionId) return
 
     // Skip internal sessions
@@ -145,6 +146,14 @@ export class HookServer extends EventEmitter {
           session.status = 'done'
           session.doneAt = timestamp || Date.now()
           session.stopCount++
+          // Update title from first user prompt (only on first stop)
+          if (title && session.stopCount === 1) {
+            session.name = title
+          }
+          // Update cwd if we got a better one
+          if (cwd && cwd !== session.cwd && !cwd.endsWith('/User') && !cwd.endsWith('\\User')) {
+            session.cwd = cwd
+          }
           this.emit('session-stop', session)
         }
         break

@@ -1,36 +1,34 @@
 param([string]$Event)  # start | stop | end
 
 # Read Claude Code stdin JSON
+# Use regex extraction instead of ConvertFrom-Json to avoid encoding issues
 $inputText = ""
 try { $inputText = [Console]::In.ReadToEnd() } catch { }
-try { $inputData = $inputText | ConvertFrom-Json -EA Stop } catch { $inputData = $null }
 
-# Extract session_id
+# Extract fields via regex (robust against garbled characters in other fields)
 $sessionId = ""
-if ($inputData -and $inputData.session_id) { $sessionId = $inputData.session_id }
+if ($inputText -match '"session_id"\s*:\s*"([^"]+)"') { $sessionId = $Matches[1] }
 
-# Get CWD: prefer CLAUDE_PROJECT_DIR env var
 $cwd = ""
-if ($env:CLAUDE_PROJECT_DIR) {
-    $cwd = $env:CLAUDE_PROJECT_DIR
-} elseif ($inputData -and $inputData.cwd) {
-    $cwd = $inputData.cwd
-} else {
-    $cwd = (Get-Location).Path
+if ($inputText -match '"cwd"\s*:\s*"([^"]+)"') {
+    $cwd = $Matches[1] -replace '\\\\', '\'
+}
+if (-not $cwd) { $cwd = (Get-Location).Path }
+
+$transcriptPath = ""
+if ($inputText -match '"transcript_path"\s*:\s*"([^"]+)"') {
+    $transcriptPath = $Matches[1] -replace '\\\\', '\'
 }
 
-# Find window handle on SessionStart
-# Walk up process tree, skip explorer.exe (its HWND is a hidden window)
+# Find window handle on SessionStart (walk up process tree, skip explorer)
 [long]$hwnd = 0
 if ($Event -eq "start") {
-    # Strategy 1: Walk process tree to find a real terminal window
     $currentPid = $PID
     $visited = @{}
     while ($currentPid -and -not $visited.ContainsKey($currentPid)) {
         $visited[$currentPid] = $true
         $proc = Get-Process -Id $currentPid -EA SilentlyContinue
         if ($proc -and $proc.MainWindowHandle -ne 0) {
-            # Skip explorer.exe — its HWND is a hidden shell window, not our terminal
             if ($proc.ProcessName -ne 'explorer') {
                 $hwnd = $proc.MainWindowHandle.ToInt64()
                 break
@@ -41,23 +39,38 @@ if ($Event -eq "start") {
             $currentPid = $parentId
         } catch { break }
     }
-
-    # Strategy 2: If not found, try to find any WindowsTerminal window
-    # (for cases where claude was launched from explorer address bar)
     if ($hwnd -eq 0) {
         $wt = Get-Process -Name 'WindowsTerminal' -EA SilentlyContinue |
               Where-Object { $_.MainWindowHandle -ne 0 } |
               Sort-Object StartTime -Descending |
               Select-Object -First 1
-        if ($wt) {
-            $hwnd = $wt.MainWindowHandle.ToInt64()
-        }
+        if ($wt) { $hwnd = $wt.MainWindowHandle.ToInt64() }
     }
+}
+
+# On Stop: read transcript to get first user prompt as session title
+$title = ""
+if ($Event -eq "stop" -and $transcriptPath -and (Test-Path $transcriptPath)) {
+    try {
+        # Read first 20 lines, find first user message
+        $lines = Get-Content -Path $transcriptPath -TotalCount 20 -Encoding UTF8 -EA Stop
+        foreach ($line in $lines) {
+            if ($line -match '"type"\s*:\s*"user"' -and $line -match '"content"\s*:\s*"([^"]{1,100})') {
+                $title = $Matches[1]
+                # Clean up escape sequences
+                $title = $title -replace '\\n', ' ' -replace '\\t', ' ' -replace '\s+', ' '
+                # Truncate to 50 chars
+                if ($title.Length -gt 50) { $title = $title.Substring(0, 50) + '...' }
+                break
+            }
+        }
+    } catch { }
 }
 
 # Build JSON
 $escapedCwd = $cwd -replace '\\', '\\\\' -replace '"', '\\"'
-$jsonBody = '{"event":"' + $Event + '","sessionId":"' + $sessionId + '","cwd":"' + $escapedCwd + '","pid":' + $PID + ',"hwnd":' + $hwnd + ',"timestamp":' + [DateTimeOffset]::Now.ToUnixTimeMilliseconds() + '}'
+$escapedTitle = $title -replace '\\', '\\\\' -replace '"', '\\"'
+$jsonBody = '{"event":"' + $Event + '","sessionId":"' + $sessionId + '","cwd":"' + $escapedCwd + '","title":"' + $escapedTitle + '","pid":' + $PID + ',"hwnd":' + $hwnd + ',"timestamp":' + [DateTimeOffset]::Now.ToUnixTimeMilliseconds() + '}'
 
 # Send to Dashboard
 try {
