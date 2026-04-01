@@ -1,5 +1,7 @@
 import { execSync, exec } from 'child_process'
 import { EventEmitter } from 'events'
+import * as path from 'path'
+import { app } from 'electron'
 
 export interface ExternalSession {
   claudePid: number
@@ -48,30 +50,22 @@ export class ExternalSessionScanner extends EventEmitter {
     }
   }
 
-  // Bring parent window to foreground
+  // Bring parent window to foreground using external .ps1 script
   bringToFront(claudePid: number): boolean {
     const session = this.sessions.get(claudePid)
     if (!session) return false
 
     try {
-      // Simple, reliable approach: use PowerShell synchronously but with short timeout
-      const script =
-        `Add-Type 'using System; using System.Runtime.InteropServices; public class W { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c); [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h); }'; ` +
-        `$target = ${session.parentPid}; ` +
-        `$p = Get-Process -Id $target -EA SilentlyContinue; ` +
-        `if (!$p -or $p.MainWindowHandle -eq 0) { ` +
-        `  try { $gp = (Get-CimInstance Win32_Process -Filter "ProcessId=$target" -EA Stop).ParentProcessId; $p = Get-Process -Id $gp -EA SilentlyContinue } catch {} ` +
-        `}; ` +
-        `if ($p -and $p.MainWindowHandle -ne 0) { ` +
-        `  if ([W]::IsIconic($p.MainWindowHandle)) { [W]::ShowWindow($p.MainWindowHandle, 9) }; ` +
-        `  [W]::SetForegroundWindow($p.MainWindowHandle) ` +
-        `}`
+      // Resolve script path (works in both dev and packaged mode)
+      const isDev = !app.isPackaged
+      const scriptPath = isDev
+        ? path.join(process.cwd(), 'scripts', 'focus-window.ps1')
+        : path.join(process.resourcesPath, 'scripts', 'focus-window.ps1')
 
-      execSync(`powershell.exe -NoProfile -WindowStyle Hidden -Command "${script}"`, {
-        encoding: 'utf-8',
-        timeout: 3000,
-        windowsHide: true
-      })
+      execSync(
+        `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -TargetPid ${session.parentPid}`,
+        { encoding: 'utf-8', timeout: 3000, windowsHide: true }
+      )
       return true
     } catch {
       return false
