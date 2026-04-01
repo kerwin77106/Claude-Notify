@@ -15,9 +15,11 @@ export interface ExternalSession {
 
 export class ExternalSessionScanner extends EventEmitter {
   private sessions: Map<number, ExternalSession> = new Map()
+  private resolvedPids: Set<number> = new Set() // PIDs already resolved (don't query again)
   private scanTimer: ReturnType<typeof setInterval> | null = null
   private internalPidsProvider: () => number[]
   private scanning = false
+  private resolving = false
 
   constructor(internalPidsProvider: () => number[]) {
     super()
@@ -101,18 +103,19 @@ export class ExternalSessionScanner extends EventEmitter {
         foundPids.add(parseInt(match[1], 10))
       }
 
-      // Find new PIDs that we haven't seen before
+      // Find new PIDs that we haven't seen or resolved before
       const internalPids = this.internalPidsProvider()
       const newPids: number[] = []
 
       for (const pid of foundPids) {
-        if (!this.sessions.has(pid) && !internalPids.includes(pid)) {
+        if (!this.sessions.has(pid) && !this.resolvedPids.has(pid) && !internalPids.includes(pid)) {
           newPids.push(pid)
+          this.resolvedPids.add(pid) // Mark as seen, won't query again
         }
       }
 
-      // For new PIDs, get parent PID info asynchronously
-      if (newPids.length > 0) {
+      // For new PIDs, get parent PID info asynchronously (only if not already resolving)
+      if (newPids.length > 0 && !this.resolving) {
         this.resolveNewPids(newPids, foundPids, internalPids)
       }
 
@@ -140,10 +143,12 @@ export class ExternalSessionScanner extends EventEmitter {
 
   // Resolve parent PIDs for newly discovered claude processes (async, doesn't block UI)
   private resolveNewPids(newPids: number[], allClaudePids: Set<number>, internalPids: number[]): void {
+    this.resolving = true
     const pidFilter = newPids.map((p) => `ProcessId=${p}`).join(' OR ')
     const cmd = `powershell.exe -NoProfile -WindowStyle Hidden -Command "Get-CimInstance Win32_Process -Filter '${pidFilter}' | Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation"`
 
     exec(cmd, { encoding: 'utf-8', timeout: 5000, windowsHide: true }, (err, stdout) => {
+      this.resolving = false
       if (err || !stdout) return
 
       const lines = stdout.trim().split('\n').slice(1)
@@ -176,29 +181,8 @@ export class ExternalSessionScanner extends EventEmitter {
 
         this.sessions.set(pid, session)
         this.emit('new-session', session)
-
-        // Try to get window title of parent for display name
-        this.resolveParentTitle(session)
       }
     })
-  }
-
-  // Get parent window title (usually contains the working directory)
-  private resolveParentTitle(session: ExternalSession): void {
-    exec(
-      `powershell.exe -NoProfile -WindowStyle Hidden -Command "(Get-Process -Id ${session.parentPid} -EA SilentlyContinue).MainWindowTitle"`,
-      { encoding: 'utf-8', timeout: 3000, windowsHide: true },
-      (err, stdout) => {
-        if (err || !stdout) return
-        const title = stdout.trim()
-        if (title && title.length > 1) {
-          // Window title often contains path like "C:\Users\...\project"
-          session.name = title.split(/[\\\/]/).pop() || title
-          session.cwd = title
-          this.emit('status-change', session)
-        }
-      }
-    )
   }
 
   private handleNoProcesses(): void {

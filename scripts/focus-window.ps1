@@ -24,31 +24,28 @@ function FocusWindow($targetProc) {
     return $false
 }
 
-function FindAncestorWindow($startPid) {
-    $visited = @{}
-    $currentPid = $startPid
-    while ($currentPid -and -not $visited.ContainsKey($currentPid)) {
-        $visited[$currentPid] = $true
-        $currentProc = Get-Process -Id $currentPid -ErrorAction SilentlyContinue
-        if ($currentProc -and $currentProc.MainWindowHandle -ne 0) {
-            return $currentProc
-        }
-        try {
-            $parentId = (Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction Stop).ParentProcessId
-            if ($parentId -and $parentId -ne 0) {
-                $currentPid = $parentId
-            } else {
-                break
-            }
-        } catch {
-            break
-        }
-    }
-    return $null
+# Strategy 1: Walk up the process tree to find a window
+$visited = @{}
+$currentPid = $TargetPid
+while ($currentPid -and -not $visited.ContainsKey($currentPid)) {
+    $visited[$currentPid] = $true
+    $currentProc = Get-Process -Id $currentPid -ErrorAction SilentlyContinue
+    if (FocusWindow $currentProc) { exit 0 }
+    try {
+        $parentId = (Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction Stop).ParentProcessId
+        if ($parentId -and $parentId -ne 0 -and $parentId -ne $currentPid) {
+            $currentPid = $parentId
+        } else { break }
+    } catch { break }
 }
 
-# Walk up the process tree until we find a window
-$foundProc = FindAncestorWindow $TargetPid
-if (FocusWindow $foundProc) { exit 0 }
+# Strategy 2: If parent is explorer, the console is likely hosted by Windows Terminal
+$wtProc = Get-Process -Name 'WindowsTerminal' -ErrorAction SilentlyContinue | Select-Object -First 1
+if (FocusWindow $wtProc) { exit 0 }
+
+# Strategy 3: Try conhost or cmd windows
+$conhost = Get-Process -Name 'conhost' -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if (FocusWindow $conhost) { exit 0 }
 
 exit 1
