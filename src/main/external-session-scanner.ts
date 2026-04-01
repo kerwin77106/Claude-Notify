@@ -99,12 +99,13 @@ export class ExternalSessionScanner extends EventEmitter {
     }
   }
 
-  // Scan for claude.exe processes
+  // Scan for claude.exe processes (only top-level, not subagents)
   private scan(): void {
     try {
+      // Get all claude.exe processes with parent process name
       const output = execSync(
-        'powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'claude.exe\'\\" | Select-Object ProcessId, ParentProcessId, ExecutablePath | ConvertTo-Json -Compress"',
-        { encoding: 'utf-8', timeout: 5000 }
+        'powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'claude.exe\'\\" | ForEach-Object { $parent = Get-CimInstance Win32_Process -Filter (\\"ProcessId=$($_.ParentProcessId)\\") -ErrorAction SilentlyContinue; [PSCustomObject]@{ ProcessId=$_.ProcessId; ParentProcessId=$_.ParentProcessId; ParentName=if($parent){$parent.Name}else{\'unknown\'} } } | ConvertTo-Json -Compress"',
+        { encoding: 'utf-8', timeout: 8000 }
       ).trim()
 
       if (!output || output === '' || output === 'null') {
@@ -114,15 +115,21 @@ export class ExternalSessionScanner extends EventEmitter {
 
       const processes = Array.isArray(JSON.parse(output)) ? JSON.parse(output) : [JSON.parse(output)]
       const internalPids = this.internalPidsProvider()
+      const claudePids = new Set(processes.map((p: any) => p.ProcessId))
       const currentPids = new Set<number>()
 
       for (const proc of processes) {
         const pid = proc.ProcessId
         const parentPid = proc.ParentProcessId
+        const parentName = (proc.ParentName || '').toLowerCase()
 
-        // Skip internal sessions
+        // Skip internal sessions (spawned by Dashboard)
         if (internalPids.includes(pid)) continue
 
+        // Skip subagents: parent is also claude.exe
+        if (claudePids.has(parentPid) || parentName === 'claude.exe') continue
+
+        // Only keep top-level claude processes (parent is a shell or terminal)
         currentPids.add(pid)
 
         if (!this.sessions.has(pid)) {
