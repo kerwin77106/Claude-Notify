@@ -55,3 +55,10 @@ export const IPC_WINDOW_STATE_CHANGE = 'window:stateChange'
 // Tray channels
 export const IPC_TRAY_UPDATE = 'tray:update'
 export const IPC_TRAY_ACTION = 'tray:action'
+
+// External session channels
+export const IPC_EXTERNAL_SESSION_LIST = 'external:list'
+export const IPC_EXTERNAL_SESSION_NEW = 'external:new'
+export const IPC_EXTERNAL_SESSION_STATUS = 'external:status'
+export const IPC_EXTERNAL_SESSION_REMOVED = 'external:removed'
+export const IPC_EXTERNAL_SESSION_FOCUS = 'external:focus'

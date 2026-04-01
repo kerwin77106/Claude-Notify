@@ -1,10 +1,9 @@
 import * as pty from 'node-pty'
 import { EventEmitter } from 'events'
-import { execSync } from 'child_process'
-import * as path from 'path'
 
 interface PtyInstance {
   process: pty.IPty
+  pid: number
   outputBuffer: string[]
   maxBufferLines: number
 }
@@ -12,44 +11,41 @@ interface PtyInstance {
 export class PtyManager extends EventEmitter {
   private instances: Map<string, PtyInstance> = new Map()
 
-  // Create a new pty process for a session
+  // Track PIDs of internally spawned claude processes (for Phase 7 exclusion)
+  getInternalPids(): number[] {
+    return Array.from(this.instances.values()).map((i) => i.pid)
+  }
+
+  // Create a new pty process running PowerShell, then auto-launch claude
   create(
     sessionId: string,
     cwd: string,
-    cols: number = 120,
-    rows: number = 30,
+    cols: number = 80,
+    rows: number = 24,
     maxBufferLines: number = 5000
   ): number {
     if (this.instances.has(sessionId)) {
       throw new Error(`PTY already exists for session ${sessionId}`)
     }
 
-    // Resolve claude executable full path (node-pty needs it on Windows)
-    let claudePath = 'claude'
-    if (process.platform === 'win32') {
-      try {
-        claudePath = execSync('where claude.exe', { encoding: 'utf-8' }).trim().split('\n')[0].trim()
-      } catch {
-        // Fallback to common location
-        claudePath = path.join(process.env.USERPROFILE || '', '.local', 'bin', 'claude.exe')
-      }
-    }
+    // Spawn PowerShell as the shell, matching user's normal environment
+    const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
+    const shellArgs = process.platform === 'win32'
+      ? ['-NoLogo', '-NoExit', '-Command', 'claude']
+      : ['-c', 'claude']
 
-    const proc = pty.spawn(claudePath, [], {
+    const proc = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
       cols,
       rows,
       cwd,
-      env: {
-        ...process.env,
-        FORCE_COLOR: '1',
-        TERM: 'xterm-256color',
-      },
+      env: { ...process.env },
       useConpty: true
     })
 
     const instance: PtyInstance = {
       process: proc,
+      pid: proc.pid,
       outputBuffer: [],
       maxBufferLines
     }
@@ -58,7 +54,7 @@ export class PtyManager extends EventEmitter {
     proc.onData((data: string) => {
       instance.outputBuffer.push(data)
 
-      // Trim buffer if it exceeds max lines
+      // Trim buffer if it exceeds max chunks
       if (instance.outputBuffer.length > maxBufferLines) {
         instance.outputBuffer = instance.outputBuffer.slice(-maxBufferLines)
       }
@@ -113,13 +109,13 @@ export class PtyManager extends EventEmitter {
 
   // Destroy all pty instances
   destroyAll(): void {
-    for (const [sessionId, instance] of this.instances) {
+    for (const [, instance] of this.instances) {
       try {
         instance.process.kill()
       } catch {
         // Ignore errors during cleanup
       }
-      this.instances.delete(sessionId)
     }
+    this.instances.clear()
   }
 }

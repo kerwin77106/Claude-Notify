@@ -22,7 +22,9 @@ import {
   IPC_WINDOW_STATE,
   IPC_WINDOW_SET_TITLE,
   IPC_TRAY_UPDATE,
-  IPC_TRAY_ACTION
+  IPC_TRAY_ACTION,
+  IPC_EXTERNAL_SESSION_LIST,
+  IPC_EXTERNAL_SESSION_FOCUS
 } from '../shared/constants'
 import type { SessionManager } from './session-manager'
 import type { PtyManager } from './pty-manager'
@@ -33,6 +35,7 @@ import type { StatsService } from './stats-service'
 import type { UpdaterService } from './updater-service'
 import type { WindowManager } from './window-manager'
 import type { TrayManager } from './tray-manager'
+import type { ExternalSessionScanner } from './external-session-scanner'
 import { dialog } from 'electron'
 
 interface IpcHandlerDeps {
@@ -45,6 +48,7 @@ interface IpcHandlerDeps {
   updaterService: UpdaterService
   windowManager: WindowManager
   trayManager?: TrayManager
+  externalScanner?: ExternalSessionScanner
 }
 
 export function registerAllIpcHandlers(deps: IpcHandlerDeps): void {
@@ -203,5 +207,19 @@ export function registerAllIpcHandlers(deps: IpcHandlerDeps): void {
     if (trayManager) {
       trayManager.update(activeSessionCount)
     }
+  })
+
+  // --- External session handlers ---
+
+  const { externalScanner } = deps
+
+  ipcMain.handle(IPC_EXTERNAL_SESSION_LIST, () => {
+    if (!externalScanner) return []
+    return externalScanner.getSessions()
+  })
+
+  ipcMain.handle(IPC_EXTERNAL_SESSION_FOCUS, (_event, { claudePid }: { claudePid: number }) => {
+    if (!externalScanner) return false
+    return externalScanner.bringToFront(claudePid)
   })
 }

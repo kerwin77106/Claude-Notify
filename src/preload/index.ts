@@ -33,7 +33,12 @@ import {
   IPC_WINDOW_SET_TITLE,
   IPC_WINDOW_STATE_CHANGE,
   IPC_TRAY_UPDATE,
-  IPC_TRAY_ACTION
+  IPC_TRAY_ACTION,
+  IPC_EXTERNAL_SESSION_LIST,
+  IPC_EXTERNAL_SESSION_NEW,
+  IPC_EXTERNAL_SESSION_STATUS,
+  IPC_EXTERNAL_SESSION_REMOVED,
+  IPC_EXTERNAL_SESSION_FOCUS
 } from '../shared/constants'
 
 // Helper to create a disposable event listener
@@ -142,5 +147,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     onStatus: (callback: (data: { status: string; info?: unknown }) => void): (() => void) =>
       createListener<{ status: string; info?: unknown }>(IPC_UPDATER_STATUS, callback),
+  },
+
+  external: {
+    list: () =>
+      ipcRenderer.invoke(IPC_EXTERNAL_SESSION_LIST),
+
+    focus: (claudePid: number) =>
+      ipcRenderer.invoke(IPC_EXTERNAL_SESSION_FOCUS, { claudePid }),
+
+    onNew: (callback: (session: unknown) => void): (() => void) =>
+      createListener<unknown>(IPC_EXTERNAL_SESSION_NEW, callback),
+
+    onStatusChange: (callback: (session: unknown) => void): (() => void) =>
+      createListener<unknown>(IPC_EXTERNAL_SESSION_STATUS, callback),
+
+    onRemoved: (callback: (data: { pid: number }) => void): (() => void) =>
+      createListener<{ pid: number }>(IPC_EXTERNAL_SESSION_REMOVED, callback),
   },
 })
