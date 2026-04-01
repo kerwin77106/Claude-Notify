@@ -1,4 +1,4 @@
-import { execSync } from 'child_process'
+import { execSync, spawn as cpSpawn } from 'child_process'
 import { EventEmitter } from 'events'
 
 export interface ExternalSession {
@@ -21,14 +21,13 @@ export class ExternalSessionScanner extends EventEmitter {
     this.internalPidsProvider = internalPidsProvider
   }
 
-  // Start periodic scanning
   start(intervalMs: number = 3000): void {
     if (this.scanTimer) return
-    this.scan() // Initial scan
+    // Delay first scan to let app initialize
+    setTimeout(() => this.scan(), 1000)
     this.scanTimer = setInterval(() => this.scan(), intervalMs)
   }
 
-  // Stop scanning
   stop(): void {
     if (this.scanTimer) {
       clearInterval(this.scanTimer)
@@ -36,12 +35,10 @@ export class ExternalSessionScanner extends EventEmitter {
     }
   }
 
-  // Get all external sessions
   getSessions(): ExternalSession[] {
     return Array.from(this.sessions.values())
   }
 
-  // Mark a session as done (called from Stop hook HTTP endpoint)
   markDone(pid: number): void {
     const session = this.sessions.get(pid)
     if (session && session.status === 'running') {
@@ -51,100 +48,90 @@ export class ExternalSessionScanner extends EventEmitter {
     }
   }
 
-  // Bring the parent window (PowerShell/Terminal) to foreground
+  // Bring parent window to foreground using a fire-and-forget PowerShell
   bringToFront(claudePid: number): boolean {
     const session = this.sessions.get(claudePid)
     if (!session) return false
 
     try {
-      const script = `
-        Add-Type @"
-          using System;
-          using System.Runtime.InteropServices;
-          public class Win32Focus {
-            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-            [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-            [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
-          }
-"@
-        $proc = Get-Process -Id ${session.parentPid} -ErrorAction SilentlyContinue
-        if ($proc -and $proc.MainWindowHandle -ne 0) {
-          if ([Win32Focus]::IsIconic($proc.MainWindowHandle)) {
-            [Win32Focus]::ShowWindow($proc.MainWindowHandle, 9)
-          }
-          [Win32Focus]::SetForegroundWindow($proc.MainWindowHandle)
-          Write-Output "OK"
-        } else {
-          # Try grandparent (e.g. Windows Terminal hosts PowerShell)
-          $grandParentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=${session.parentPid}" -ErrorAction SilentlyContinue).ParentProcessId
-          if ($grandParentPid) {
-            $gProc = Get-Process -Id $grandParentPid -ErrorAction SilentlyContinue
-            if ($gProc -and $gProc.MainWindowHandle -ne 0) {
-              if ([Win32Focus]::IsIconic($gProc.MainWindowHandle)) {
-                [Win32Focus]::ShowWindow($gProc.MainWindowHandle, 9)
-              }
-              [Win32Focus]::SetForegroundWindow($gProc.MainWindowHandle)
-              Write-Output "OK"
-            }
-          }
-        }
-      `
-      const result = execSync(`powershell.exe -NoProfile -Command "${script.replace(/"/g, '\\"')}"`, {
-        encoding: 'utf-8',
-        timeout: 5000
-      }).trim()
-      return result.includes('OK')
+      // Fire and forget — don't wait for result
+      const ps = cpSpawn('powershell.exe', [
+        '-NoProfile', '-WindowStyle', 'Hidden', '-Command',
+        `$pids = @(${session.parentPid}); ` +
+        `$p = Get-Process -Id $pids -EA SilentlyContinue; ` +
+        `if (!$p -or !$p.MainWindowHandle) { ` +
+        `  $gp = (Get-CimInstance Win32_Process -Filter "ProcessId=${session.parentPid}" -EA SilentlyContinue).ParentProcessId; ` +
+        `  if ($gp) { $p = Get-Process -Id $gp -EA SilentlyContinue } ` +
+        `}; ` +
+        `if ($p -and $p.MainWindowHandle) { ` +
+        `  Add-Type 'using System; using System.Runtime.InteropServices; public class W { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c); }'; ` +
+        `  [W]::ShowWindow($p.MainWindowHandle, 9); ` +
+        `  [W]::SetForegroundWindow($p.MainWindowHandle) ` +
+        `}`
+      ], { detached: true, stdio: 'ignore' })
+      ps.unref()
+      return true
     } catch {
       return false
     }
   }
 
-  // Scan for claude.exe processes (only top-level, not subagents)
+  // Fast scan using wmic (much faster than PowerShell CIM)
   private scan(): void {
     try {
-      // Get all claude.exe processes with parent process name
+      // wmic is fast and doesn't need PowerShell
       const output = execSync(
-        'powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'claude.exe\'\\" | ForEach-Object { $parent = Get-CimInstance Win32_Process -Filter (\\"ProcessId=$($_.ParentProcessId)\\") -ErrorAction SilentlyContinue; [PSCustomObject]@{ ProcessId=$_.ProcessId; ParentProcessId=$_.ParentProcessId; ParentName=if($parent){$parent.Name}else{\'unknown\'} } } | ConvertTo-Json -Compress"',
-        { encoding: 'utf-8', timeout: 8000 }
+        'wmic process where "name=\'claude.exe\'" get ProcessId,ParentProcessId /format:csv',
+        { encoding: 'utf-8', timeout: 3000, windowsHide: true }
       ).trim()
 
-      if (!output || output === '' || output === 'null') {
+      if (!output) {
         this.handleNoProcesses()
         return
       }
 
-      const processes = Array.isArray(JSON.parse(output)) ? JSON.parse(output) : [JSON.parse(output)]
+      // Parse CSV: Node,ParentProcessId,ProcessId
+      const lines = output.split('\n').filter((l) => l.trim() && !l.startsWith('Node'))
       const internalPids = this.internalPidsProvider()
-      const claudePids = new Set(processes.map((p: any) => p.ProcessId))
+
+      // Collect all claude PIDs and their parents
+      const claudeProcesses: { pid: number; parentPid: number }[] = []
+      const allClaudePids = new Set<number>()
+
+      for (const line of lines) {
+        const parts = line.trim().split(',')
+        if (parts.length < 3) continue
+        const parentPid = parseInt(parts[1], 10)
+        const pid = parseInt(parts[2], 10)
+        if (isNaN(pid) || isNaN(parentPid)) continue
+        claudeProcesses.push({ pid, parentPid })
+        allClaudePids.add(pid)
+      }
+
       const currentPids = new Set<number>()
 
-      for (const proc of processes) {
-        const pid = proc.ProcessId
-        const parentPid = proc.ParentProcessId
-        const parentName = (proc.ParentName || '').toLowerCase()
+      for (const { pid, parentPid } of claudeProcesses) {
+        // Skip subagents (parent is also claude.exe)
+        if (allClaudePids.has(parentPid)) continue
 
-        // Skip internal sessions (spawned by Dashboard)
-        if (internalPids.includes(pid)) continue
+        // Skip internal sessions (parent is our PowerShell PTY)
+        if (internalPids.includes(parentPid)) continue
 
-        // Skip subagents: parent is also claude.exe
-        if (claudePids.has(parentPid) || parentName === 'claude.exe') continue
-
-        // Only keep top-level claude processes (parent is a shell or terminal)
         currentPids.add(pid)
 
         if (!this.sessions.has(pid)) {
-          // New external session detected
-          const cwd = this.getCwd(pid)
-          const name = cwd ? cwd.split(/[/\\]/).pop() || `PID:${pid}` : `PID:${pid}`
-
+          const name = `PID:${pid}`
           const session: ExternalSession = {
             claudePid: pid,
             parentPid,
-            cwd: cwd || '',
+            cwd: '',
             name,
             status: 'running',
             detectedAt: Date.now()
           }
+
+          // Try to get cwd asynchronously (don't block scan)
+          this.resolveCwdAsync(pid, session)
 
           this.sessions.set(pid, session)
           this.emit('new-session', session)
@@ -159,35 +146,59 @@ export class ExternalSessionScanner extends EventEmitter {
         }
       }
 
-      // Clean up sessions that have been exited for over 5 minutes
-      const fiveMinAgo = Date.now() - 5 * 60 * 1000
+      // Clean up old exited sessions (> 5 min)
+      const cutoff = Date.now() - 5 * 60 * 1000
       for (const [pid, session] of this.sessions) {
-        if (session.status === 'exited' && (session.doneAt || session.detectedAt) < fiveMinAgo) {
+        if (session.status === 'exited' && (session.doneAt || session.detectedAt) < cutoff) {
           this.sessions.delete(pid)
           this.emit('removed', pid)
         }
       }
     } catch {
-      // Scan failed, skip this cycle
+      // Scan failed, skip
     }
   }
 
-  // Get working directory of a process
-  private getCwd(pid: number): string {
+  // Resolve cwd in background without blocking scan
+  private resolveCwdAsync(pid: number, session: ExternalSession): void {
     try {
-      const result = execSync(
-        `powershell.exe -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine"`,
-        { encoding: 'utf-8', timeout: 3000 }
-      ).trim()
+      const ps = cpSpawn('wmic', [
+        'process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/format:list'
+      ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
 
-      // Try to extract --cwd or working directory from command line
-      const cwdMatch = result.match(/--cwd\s+"?([^"]+)"?/) || result.match(/--directory\s+"?([^"]+)"?/)
-      if (cwdMatch) return cwdMatch[1]
+      let data = ''
+      ps.stdout?.on('data', (chunk) => { data += chunk.toString() })
+      ps.on('close', () => {
+        // Try to extract directory from command line
+        const match = data.match(/CommandLine=(.+)/)
+        if (match) {
+          const cmdLine = match[1].trim()
+          // claude.exe is usually run from the project directory
+          // The cwd isn't in the command line, but we can try the parent's cwd
+          // For now, just update the session name
+        }
 
-      // Fallback: use parent process's current directory
-      return ''
+        // Alternative: try to get cwd via PowerShell (async, won't block)
+        const ps2 = cpSpawn('powershell.exe', [
+          '-NoProfile', '-WindowStyle', 'Hidden', '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${session.parentPid}" -EA SilentlyContinue).CommandLine`
+        ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+
+        let data2 = ''
+        ps2.stdout?.on('data', (chunk) => { data2 += chunk.toString() })
+        ps2.on('close', () => {
+          // Try to extract path from parent's command line
+          const pathMatch = data2.match(/-(?:WorkingDirectory|cd|wd)\s+"?([^"]+)"?/) ||
+            data2.match(/Set-Location\s+"?([^"]+)"?/)
+          if (pathMatch) {
+            session.cwd = pathMatch[1].trim()
+            session.name = session.cwd.split(/[/\\]/).pop() || session.name
+            this.emit('status-change', session)
+          }
+        })
+      })
     } catch {
-      return ''
+      // Ignore cwd resolution errors
     }
   }
 
