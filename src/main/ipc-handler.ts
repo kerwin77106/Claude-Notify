@@ -219,10 +219,15 @@ export function registerAllIpcHandlers(deps: IpcHandlerDeps): void {
     return hookServer.getSessions()
   })
 
-  ipcMain.handle(IPC_EXTERNAL_SESSION_FOCUS, (_event, { sessionId }: { sessionId: string }) => {
-    if (!hookServer) return false
+  ipcMain.handle(IPC_EXTERNAL_SESSION_FOCUS, (_event, args: any) => {
+    console.log('[IPC] external:focus called with:', JSON.stringify(args))
+    if (!hookServer) { console.log('[IPC] no hookServer'); return false }
+    const sessionId = args?.sessionId
     const session = hookServer.getSession(sessionId)
+    console.log('[IPC] found session:', session ? `hwnd=${session.hwnd}` : 'NOT FOUND')
     if (!session || !session.hwnd) return false
-    return focusWindow(session.hwnd)
+    const result = focusWindow(session.hwnd)
+    console.log('[IPC] focusWindow result:', result)
+    return result
   })
 }

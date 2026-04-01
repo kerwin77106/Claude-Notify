@@ -115,6 +115,7 @@ export class HookServer extends EventEmitter {
     timestamp?: number
   }): void {
     const { event, sessionId, cwd, pid, hwnd, timestamp } = data
+    console.log(`[HookServer] ${event}: sessionId=${sessionId}, cwd=${cwd}, hwnd=${hwnd}, pid=${pid}`)
     if (!sessionId) return
 
     // Skip internal sessions
