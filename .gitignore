@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+
+# Electron Builder output
+release/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Spec artifacts (local working files)
+.spec/
