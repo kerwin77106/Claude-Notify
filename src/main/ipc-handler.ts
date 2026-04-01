@@ -35,7 +35,8 @@ import type { StatsService } from './stats-service'
 import type { UpdaterService } from './updater-service'
 import type { WindowManager } from './window-manager'
 import type { TrayManager } from './tray-manager'
-import type { ExternalSessionScanner } from './external-session-scanner'
+import type { HookServer } from './hook-server'
+import { focusWindow } from './focus-window'
 import { dialog } from 'electron'
 
 interface IpcHandlerDeps {
@@ -48,7 +49,7 @@ interface IpcHandlerDeps {
   updaterService: UpdaterService
   windowManager: WindowManager
   trayManager?: TrayManager
-  externalScanner?: ExternalSessionScanner
+  hookServer?: HookServer
 }
 
 export function registerAllIpcHandlers(deps: IpcHandlerDeps): void {
@@ -211,15 +212,17 @@ export function registerAllIpcHandlers(deps: IpcHandlerDeps): void {
 
   // --- External session handlers ---
 
-  const { externalScanner } = deps
+  const { hookServer } = deps
 
   ipcMain.handle(IPC_EXTERNAL_SESSION_LIST, () => {
-    if (!externalScanner) return []
-    return externalScanner.getSessions()
+    if (!hookServer) return []
+    return hookServer.getSessions()
   })
 
-  ipcMain.handle(IPC_EXTERNAL_SESSION_FOCUS, (_event, { claudePid }: { claudePid: number }) => {
-    if (!externalScanner) return false
-    return externalScanner.bringToFront(claudePid)
+  ipcMain.handle(IPC_EXTERNAL_SESSION_FOCUS, (_event, { sessionId }: { sessionId: string }) => {
+    if (!hookServer) return false
+    const session = hookServer.getSession(sessionId)
+    if (!session || !session.hwnd) return false
+    return focusWindow(session.hwnd)
   })
 }

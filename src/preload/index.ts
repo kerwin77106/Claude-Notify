@@ -153,8 +153,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     list: () =>
       ipcRenderer.invoke(IPC_EXTERNAL_SESSION_LIST),
 
-    focus: (claudePid: number) =>
-      ipcRenderer.invoke(IPC_EXTERNAL_SESSION_FOCUS, { claudePid }),
+    focus: (sessionId: string) =>
+      ipcRenderer.invoke(IPC_EXTERNAL_SESSION_FOCUS, { sessionId }),
 
     onNew: (callback: (session: unknown) => void): (() => void) =>
       createListener<unknown>(IPC_EXTERNAL_SESSION_NEW, callback),

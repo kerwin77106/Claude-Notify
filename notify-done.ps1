@@ -1,13 +1,7 @@
-# Claude Code completion notification
-# For Stop hook — sends Toast notification + reports to Dashboard
+# Claude Code completion notification (standalone mode)
+# For Stop hook — sends Windows Toast notification only
+# Dashboard integration is handled by hook-report.ps1
 
-# Report to Dashboard (if running) — fire and forget
-try {
-    $reportBody = @{ pid = $PID; cwd = (Get-Location).Path } | ConvertTo-Json -Compress
-    Invoke-WebRequest -Uri "http://127.0.0.1:23847/api/session-done" -Method POST -Body $reportBody -ContentType "application/json" -TimeoutSec 2 -ErrorAction SilentlyContinue | Out-Null
-} catch { }
-
-# Send Windows Toast notification
 try {
     [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
     [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]

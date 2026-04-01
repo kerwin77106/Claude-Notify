@@ -2,28 +2,28 @@ import { useEffect, useCallback } from 'react'
 import { useExternalStore, ExternalSession } from '../stores/external-store'
 
 export function useExternalSessions() {
-  const { sessions, setSessions, addSession, updateSession, removeSession } = useExternalStore()
+  const { sessions, setSessions, addSession, updateSession } = useExternalStore()
 
-  // Load initial external sessions
+  // Load existing external sessions on mount
   const loadExternalSessions = useCallback(async () => {
     try {
       const list = await (window as any).electronAPI.external.list()
       setSessions(list || [])
     } catch {
-      // External API might not be available yet
+      // External API might not be available
     }
   }, [setSessions])
 
-  // Focus (bring to front) an external session's PowerShell window
-  const focusExternalSession = useCallback(async (claudePid: number) => {
+  // Focus an external session's window via HWND
+  const focusExternalSession = useCallback(async (sessionId: string) => {
     try {
-      await (window as any).electronAPI.external.focus(claudePid)
+      await (window as any).electronAPI.external.focus(sessionId)
     } catch (err) {
       console.error('Failed to focus external session:', err)
     }
   }, [])
 
-  // Listen for external session events
+  // Listen for hook-server events
   useEffect(() => {
     const api = (window as any).electronAPI.external
     if (!api) return
@@ -36,11 +36,10 @@ export function useExternalSessions() {
       updateSession(session)
     })
 
-    const unsubRemoved = api.onRemoved(({ pid }: { pid: number }) => {
-      removeSession(pid)
+    const unsubRemoved = api.onRemoved(({ sessionId }: { sessionId: string }) => {
+      useExternalStore.getState().removeSession(sessionId)
     })
 
-    // Initial load
     loadExternalSessions()
 
     return () => {
@@ -48,11 +47,10 @@ export function useExternalSessions() {
       unsubStatus()
       unsubRemoved()
     }
-  }, [addSession, updateSession, removeSession, loadExternalSessions])
+  }, [addSession, updateSession, loadExternalSessions])
 
   return {
     externalSessions: sessions,
     focusExternalSession,
-    loadExternalSessions,
   }
 }

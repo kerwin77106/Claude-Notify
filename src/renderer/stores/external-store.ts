@@ -1,13 +1,15 @@
 import { create } from 'zustand'
 
 export interface ExternalSession {
-  claudePid: number
-  parentPid: number
+  sessionId: string
+  pid: number
   cwd: string
   name: string
+  hwnd: number
   status: 'running' | 'done' | 'exited'
-  detectedAt: number
+  startedAt: number
   doneAt?: number
+  stopCount: number
 }
 
 interface ExternalStore {
@@ -15,7 +17,7 @@ interface ExternalStore {
   setSessions: (sessions: ExternalSession[]) => void
   addSession: (session: ExternalSession) => void
   updateSession: (session: ExternalSession) => void
-  removeSession: (pid: number) => void
+  removeSession: (sessionId: string) => void
 }
 
 export const useExternalStore = create<ExternalStore>((set) => ({
@@ -25,20 +27,19 @@ export const useExternalStore = create<ExternalStore>((set) => ({
 
   addSession: (session) =>
     set((state) => {
-      // Avoid duplicates
-      if (state.sessions.some((s) => s.claudePid === session.claudePid)) return state
+      if (state.sessions.some((s) => s.sessionId === session.sessionId)) return state
       return { sessions: [...state.sessions, session] }
     }),
 
   updateSession: (session) =>
     set((state) => ({
       sessions: state.sessions.map((s) =>
-        s.claudePid === session.claudePid ? { ...s, ...session } : s
+        s.sessionId === session.sessionId ? { ...s, ...session } : s
       ),
     })),
 
-  removeSession: (pid) =>
+  removeSession: (sessionId) =>
     set((state) => ({
-      sessions: state.sessions.filter((s) => s.claudePid !== pid),
+      sessions: state.sessions.filter((s) => s.sessionId !== sessionId),
     })),
 }))

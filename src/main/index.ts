@@ -9,7 +9,6 @@ import { WindowManager } from './window-manager'
 import { GitService } from './git-service'
 import { StatsService } from './stats-service'
 import { UpdaterService } from './updater-service'
-import { ExternalSessionScanner } from './external-session-scanner'
 import { HookServer } from './hook-server'
 import { registerAllIpcHandlers } from './ipc-handler'
 import {
@@ -22,7 +21,7 @@ import {
   IPC_EXTERNAL_SESSION_REMOVED
 } from '../shared/constants'
 
-// Prevent multiple instances - check early before initializing anything
+// Prevent multiple instances
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
@@ -40,8 +39,7 @@ const gitService = new GitService()
 const statsService = new StatsService()
 const updaterService = new UpdaterService()
 
-// Phase 7: External session scanner + hook server
-const externalScanner = new ExternalSessionScanner(() => ptyManager.getInternalPids())
+// Phase 7 v2: Hook-driven external session monitoring
 const hookServer = new HookServer()
 
 // Helper to send events to the renderer
@@ -96,42 +94,26 @@ notificationManager.onNotificationClicked((sessionId: string) => {
   sendToRenderer('notification:focusSession', sessionId)
 })
 
-// Wire up external session scanner events
-externalScanner.on('new-session', (session) => {
+// Wire up hook server events (external sessions)
+hookServer.on('session-start', (session) => {
   sendToRenderer(IPC_EXTERNAL_SESSION_NEW, session)
-  // Send notification for new external session detected
-  const total = externalScanner.getSessions().filter((s) => s.status === 'running').length
-  trayManager.update(sessionManager.listSessions().length + total)
+  const extCount = hookServer.getSessions().filter((s) => s.status === 'running').length
+  trayManager.update(sessionManager.listSessions().length + extCount)
 })
 
-externalScanner.on('status-change', (session) => {
+hookServer.on('session-stop', (session) => {
   sendToRenderer(IPC_EXTERNAL_SESSION_STATUS, session)
-
   // Notify when external session completes
-  if (session.status === 'done') {
-    notificationManager.trySendNotification(
-      `ext-${session.claudePid}`,
-      `${session.name} [外部]`,
-      'idle',
-      10001 // Force past threshold
-    )
-  }
+  notificationManager.trySendNotification(
+    `ext-${session.sessionId}`,
+    `${session.name} [外部]`,
+    'idle',
+    10001 // Force past threshold
+  )
 })
 
-externalScanner.on('removed', (pid) => {
-  sendToRenderer(IPC_EXTERNAL_SESSION_REMOVED, { pid })
-})
-
-// Wire up hook server (receives Stop hook reports from external sessions)
-hookServer.on('session-done', ({ pid, cwd }: { pid: number; cwd: string }) => {
-  // Try to match by PID first, then by cwd
-  const sessions = externalScanner.getSessions()
-  const match = sessions.find((s) => s.claudePid === pid) ||
-    sessions.find((s) => s.cwd && cwd && s.cwd.toLowerCase() === cwd.toLowerCase())
-
-  if (match) {
-    externalScanner.markDone(match.claudePid)
-  }
+hookServer.on('session-end', (session) => {
+  sendToRenderer(IPC_EXTERNAL_SESSION_STATUS, session)
 })
 
 // App lifecycle
@@ -146,7 +128,7 @@ app.whenReady().then(() => {
     updaterService,
     windowManager,
     trayManager,
-    externalScanner
+    hookServer
   })
 
   const mainWindow = windowManager.createMainWindow()
@@ -158,7 +140,6 @@ app.whenReady().then(() => {
     sendToRenderer(IPC_WINDOW_MAXIMIZED_CHANGED, false)
   })
 
-  // Initialize tray
   trayManager.init()
   trayManager.onAction((action) => {
     if (action === 'show') {
@@ -168,8 +149,7 @@ app.whenReady().then(() => {
     }
   })
 
-  // Start external session scanning and hook server
-  externalScanner.start(3000)
+  // Start hook server
   hookServer.start()
 })
 
@@ -184,7 +164,6 @@ app.on('before-quit', () => {
   windowManager.saveState()
   ptyManager.destroyAll()
   statusDetector.destroyAll()
-  externalScanner.stop()
   hookServer.stop()
   trayManager.destroy()
 })

@@ -155,10 +155,10 @@ const Sidebar: React.FC<SidebarProps> = ({
 
             return (
               <div
-                key={ext.claudePid}
-                onClick={() => focusExternalSession(ext.claudePid)}
+                key={ext.sessionId}
+                onClick={() => focusExternalSession(ext.sessionId)}
                 className="flex items-center gap-2 px-4 py-2.5 cursor-pointer text-[#888888] hover:bg-[#0f3460]/40 hover:text-[#e0e0e0] transition-colors"
-                title={`PID: ${ext.claudePid} — 點擊跳轉到 PowerShell 視窗`}
+                title={`${ext.cwd || ext.sessionId} — 點擊跳轉到視窗`}
               >
                 <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${statusColor}`} />
                 <div className="flex-1 min-w-0">
@@ -166,7 +166,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                     {ext.name}
                     <span className="text-[10px] px-1 py-0.5 rounded bg-[#0f3460] text-[#60a5fa]">外部</span>
                   </div>
-                  <div className="text-xs text-[#888888] truncate">{ext.cwd || `PID: ${ext.claudePid}`}</div>
+                  <div className="text-xs text-[#888888] truncate">{ext.cwd}</div>
                 </div>
                 <svg className="w-3.5 h-3.5 text-[#888888] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="跳轉">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />

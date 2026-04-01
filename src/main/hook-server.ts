@@ -3,17 +3,46 @@ import { EventEmitter } from 'events'
 
 const HOOK_PORT = 23847
 
+export interface ExternalSession {
+  sessionId: string
+  pid: number
+  cwd: string
+  name: string
+  hwnd: number
+  status: 'running' | 'done' | 'exited'
+  startedAt: number
+  doneAt?: number
+  stopCount: number
+}
+
 export class HookServer extends EventEmitter {
   private server: http.Server | null = null
+  private sessions: Map<string, ExternalSession> = new Map()
+  private internalSessionIds: Set<string> = new Set()
 
-  // Start listening for Stop hook reports
+  // Register internal session IDs to exclude from external list
+  addInternalSessionId(id: string): void {
+    this.internalSessionIds.add(id)
+  }
+
+  removeInternalSessionId(id: string): void {
+    this.internalSessionIds.delete(id)
+  }
+
+  getSessions(): ExternalSession[] {
+    return Array.from(this.sessions.values())
+  }
+
+  getSession(sessionId: string): ExternalSession | undefined {
+    return this.sessions.get(sessionId)
+  }
+
   start(): void {
     if (this.server) return
 
     this.server = http.createServer((req, res) => {
-      // CORS headers for local requests
       res.setHeader('Access-Control-Allow-Origin', '*')
-      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+      res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 
       if (req.method === 'OPTIONS') {
@@ -22,24 +51,28 @@ export class HookServer extends EventEmitter {
         return
       }
 
-      if (req.method === 'POST' && req.url === '/api/session-done') {
+      // Hook event endpoints
+      if (req.method === 'POST' && req.url?.startsWith('/api/hook/')) {
         let body = ''
         req.on('data', (chunk) => { body += chunk })
         req.on('end', () => {
           try {
             const data = JSON.parse(body)
-            // Emit event with PID and cwd
-            this.emit('session-done', {
-              pid: data.pid || 0,
-              cwd: data.cwd || ''
-            })
+            this.handleHookEvent(data)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ ok: true }))
           } catch {
             res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }))
+            res.end(JSON.stringify({ ok: false }))
           }
         })
+        return
+      }
+
+      // Session list endpoint
+      if (req.method === 'GET' && req.url === '/api/sessions') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(this.getSessions()))
         return
       }
 
@@ -58,10 +91,9 @@ export class HookServer extends EventEmitter {
       console.log(`Hook server listening on http://127.0.0.1:${HOOK_PORT}`)
     })
 
-    // Don't crash if port is in use
     this.server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
-        console.warn(`Hook server port ${HOOK_PORT} already in use, skipping`)
+        console.warn(`Hook server port ${HOOK_PORT} already in use`)
       }
       this.server = null
     })
@@ -74,7 +106,57 @@ export class HookServer extends EventEmitter {
     }
   }
 
-  getPort(): number {
-    return HOOK_PORT
+  private handleHookEvent(data: {
+    event: string
+    sessionId?: string
+    cwd?: string
+    pid?: number
+    hwnd?: number
+    timestamp?: number
+  }): void {
+    const { event, sessionId, cwd, pid, hwnd, timestamp } = data
+    if (!sessionId) return
+
+    // Skip internal sessions
+    if (this.internalSessionIds.has(sessionId)) return
+
+    switch (event) {
+      case 'start': {
+        const name = cwd ? cwd.split(/[/\\]/).pop() || `Session` : `PID:${pid}`
+        const session: ExternalSession = {
+          sessionId,
+          pid: pid || 0,
+          cwd: cwd || '',
+          name,
+          hwnd: hwnd || 0,
+          status: 'running',
+          startedAt: timestamp || Date.now(),
+          stopCount: 0
+        }
+        this.sessions.set(sessionId, session)
+        this.emit('session-start', session)
+        break
+      }
+
+      case 'stop': {
+        const session = this.sessions.get(sessionId)
+        if (session) {
+          session.status = 'done'
+          session.doneAt = timestamp || Date.now()
+          session.stopCount++
+          this.emit('session-stop', session)
+        }
+        break
+      }
+
+      case 'end': {
+        const session = this.sessions.get(sessionId)
+        if (session) {
+          session.status = 'exited'
+          this.emit('session-end', session)
+        }
+        break
+      }
+    }
   }
 }
