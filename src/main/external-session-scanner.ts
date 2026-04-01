@@ -76,33 +76,33 @@ export class ExternalSessionScanner extends EventEmitter {
     }
   }
 
-  // Fast scan using wmic (much faster than PowerShell CIM)
+  // Fast scan using tasklist + PowerShell Get-CimInstance (single call)
   private scan(): void {
     try {
-      // wmic is fast and doesn't need PowerShell
       const output = execSync(
-        'wmic process where "name=\'claude.exe\'" get ProcessId,ParentProcessId /format:csv',
-        { encoding: 'utf-8', timeout: 3000, windowsHide: true }
+        'powershell.exe -NoProfile -WindowStyle Hidden -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'claude.exe\'\\" | Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation"',
+        { encoding: 'utf-8', timeout: 5000, windowsHide: true }
       ).trim()
 
-      if (!output) {
+      if (!output || !output.includes(',')) {
         this.handleNoProcesses()
         return
       }
 
-      // Parse CSV: Node,ParentProcessId,ProcessId
-      const lines = output.split('\n').filter((l) => l.trim() && !l.startsWith('Node'))
+      // Parse CSV: "ProcessId","ParentProcessId"
+      const lines = output.split('\n').slice(1) // skip header
       const internalPids = this.internalPidsProvider()
 
-      // Collect all claude PIDs and their parents
       const claudeProcesses: { pid: number; parentPid: number }[] = []
       const allClaudePids = new Set<number>()
 
       for (const line of lines) {
-        const parts = line.trim().split(',')
-        if (parts.length < 3) continue
+        const cleaned = line.replace(/"/g, '').trim()
+        if (!cleaned) continue
+        const parts = cleaned.split(',')
+        if (parts.length < 2) continue
+        const pid = parseInt(parts[0], 10)
         const parentPid = parseInt(parts[1], 10)
-        const pid = parseInt(parts[2], 10)
         if (isNaN(pid) || isNaN(parentPid)) continue
         claudeProcesses.push({ pid, parentPid })
         allClaudePids.add(pid)
@@ -162,40 +162,23 @@ export class ExternalSessionScanner extends EventEmitter {
   // Resolve cwd in background without blocking scan
   private resolveCwdAsync(pid: number, session: ExternalSession): void {
     try {
-      const ps = cpSpawn('wmic', [
-        'process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/format:list'
+      // Use PowerShell to get the working directory of the parent process (shell)
+      const ps = cpSpawn('powershell.exe', [
+        '-NoProfile', '-WindowStyle', 'Hidden', '-Command',
+        // Get parent shell's current directory via CIM
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${session.parentPid}" -EA SilentlyContinue; ` +
+        `if ($p) { $p.ExecutablePath | Split-Path -Parent } else { "" }`
       ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
 
       let data = ''
       ps.stdout?.on('data', (chunk) => { data += chunk.toString() })
       ps.on('close', () => {
-        // Try to extract directory from command line
-        const match = data.match(/CommandLine=(.+)/)
-        if (match) {
-          const cmdLine = match[1].trim()
-          // claude.exe is usually run from the project directory
-          // The cwd isn't in the command line, but we can try the parent's cwd
-          // For now, just update the session name
+        const cwd = data.trim()
+        if (cwd && cwd.length > 2) {
+          session.cwd = cwd
+          session.name = cwd.split(/[/\\]/).pop() || session.name
+          this.emit('status-change', session)
         }
-
-        // Alternative: try to get cwd via PowerShell (async, won't block)
-        const ps2 = cpSpawn('powershell.exe', [
-          '-NoProfile', '-WindowStyle', 'Hidden', '-Command',
-          `(Get-CimInstance Win32_Process -Filter "ProcessId=${session.parentPid}" -EA SilentlyContinue).CommandLine`
-        ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
-
-        let data2 = ''
-        ps2.stdout?.on('data', (chunk) => { data2 += chunk.toString() })
-        ps2.on('close', () => {
-          // Try to extract path from parent's command line
-          const pathMatch = data2.match(/-(?:WorkingDirectory|cd|wd)\s+"?([^"]+)"?/) ||
-            data2.match(/Set-Location\s+"?([^"]+)"?/)
-          if (pathMatch) {
-            session.cwd = pathMatch[1].trim()
-            session.name = session.cwd.split(/[/\\]/).pop() || session.name
-            this.emit('status-change', session)
-          }
-        })
       })
     } catch {
       // Ignore cwd resolution errors
