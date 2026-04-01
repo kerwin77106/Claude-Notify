@@ -1,5 +1,9 @@
 param([string]$Event)  # start | stop | end
 
+# Force UTF-8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 # Read Claude Code stdin JSON
 $inputText = ""
 try { $inputText = [Console]::In.ReadToEnd() } catch { }
@@ -28,19 +32,20 @@ if ($Event -eq "start") {
     }
 }
 
-# Build report payload
-$body = @{
-    event = $Event
-    sessionId = $sessionId
-    cwd = $cwd
-    pid = $PID
-    hwnd = $hwnd
-    timestamp = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
-} | ConvertTo-Json -Compress
+# Build JSON manually to avoid encoding issues with ConvertTo-Json
+$escapedCwd = $cwd -replace '\\', '\\' -replace '"', '\"'
+$body = "{`"event`":`"$Event`",`"sessionId`":`"$sessionId`",`"cwd`":`"$escapedCwd`",`"pid`":$PID,`"hwnd`":$hwnd,`"timestamp`":$([DateTimeOffset]::Now.ToUnixTimeMilliseconds())}"
 
-# Send to Dashboard (silent fail if Dashboard not running)
+# Send to Dashboard via HttpWebRequest with UTF-8 encoding
 try {
-    Invoke-WebRequest -Uri "http://127.0.0.1:23847/api/hook/$Event" `
-        -Method POST -Body $body -ContentType "application/json" `
-        -TimeoutSec 2 -EA SilentlyContinue | Out-Null
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+    $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:23847/api/hook/$Event")
+    $request.Method = "POST"
+    $request.ContentType = "application/json; charset=utf-8"
+    $request.ContentLength = $bytes.Length
+    $request.Timeout = 2000
+    $stream = $request.GetRequestStream()
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Close()
+    $null = $request.GetResponse()
 } catch { }

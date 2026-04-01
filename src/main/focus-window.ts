@@ -1,11 +1,18 @@
 import { execSync } from 'child_process'
+import * as path from 'path'
+import { app } from 'electron'
 
 export function focusWindow(hwnd: number): boolean {
   if (!hwnd || hwnd === 0) return false
 
   try {
+    const isDev = !app.isPackaged
+    const scriptPath = isDev
+      ? path.join(process.cwd(), 'scripts', 'focus-hwnd.ps1')
+      : path.join(process.resourcesPath, 'scripts', 'focus-hwnd.ps1')
+
     execSync(
-      `powershell.exe -NoProfile -WindowStyle Hidden -Command "Add-Type -MemberDefinition '[DllImport(\\\"user32.dll\\\")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport(\\\"user32.dll\\\")] public static extern bool ShowWindow(IntPtr h, int c); [DllImport(\\\"user32.dll\\\")] public static extern bool IsIconic(IntPtr h);' -Name W -Namespace Native; $h=[IntPtr]::new(${hwnd}); if([Native.W]::IsIconic($h)){[Native.W]::ShowWindow($h,9)}; [Native.W]::SetForegroundWindow($h)"`,
+      `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -Hwnd ${hwnd}`,
       { timeout: 2000, windowsHide: true, encoding: 'utf-8' }
     )
     return true
